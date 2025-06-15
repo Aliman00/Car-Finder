@@ -36,6 +36,7 @@ async def list_tools():
         )
     ]
 
+# This function is called when a tool is invoked
 @app.call_tool()
 async def call_tool(name: str, arguments: dict):
     if name == "fetch_finn_data":
@@ -43,6 +44,8 @@ async def call_tool(name: str, arguments: dict):
     elif name == "extract_car_details":
         return await extract_car_details(arguments["car_url"])
 
+
+# This function fetches car data from Finn.no and parses it
 async def fetch_finn_data(url: str, max_pages: int = 1):
     """Enhanced version of your parse_car_data function"""
     try:
@@ -190,11 +193,13 @@ def parse_page_cars(soup, current_year):
 
     return parsed_cars_list
 
+
+# This function extracts detailed information from a specific car listing URL
 async def extract_car_details(car_url: str):
     """Extract detailed information from individual car listing"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         response = requests.get(car_url, headers=headers, timeout=10)
         response.raise_for_status()
@@ -207,13 +212,55 @@ async def extract_car_details(car_url: str):
             "title": None,
             "description": None,
             "specifications": {},
-            "seller_info": {}
+            "equipment": []
+            # "seller_info": {}
         }
         
-        # Add detailed extraction logic here
+        # Extract title
         title_tag = soup.find('h1')
         if title_tag:
             details["title"] = title_tag.get_text(strip=True)
+        
+        # Find the main content area
+        main_content = soup.find('main')
+        if main_content:
+            # Look for all sections
+            sections = main_content.find_all('section')
+            
+            for i, section in enumerate(sections):
+                section_text = section.get_text(strip=True).lower()
+                
+                # Extract Description (Beskrivelse) - section[1]
+                if 'beskrivelse' in section_text or 'description' in section_text:
+                    description = extract_description_from_section(section)
+                    if description:
+                        details["description"] = description
+                
+                # Extract Specifications (Spesifikasjoner) - section[2]
+                elif 'spesifikasjoner' in section_text or 'specifications' in section_text:
+                    specs = extract_specifications_from_section(section)
+                    details["specifications"].update(specs)
+                
+                # Extract Equipment (Utstyr) - section[3]
+                elif 'utstyr' in section_text or 'equipment' in section_text:
+                    equipment = extract_equipment_from_section(section)
+                    details["equipment"].extend(equipment)
+                
+                # Extract seller info
+                # elif 'selger' in section_text or 'dealer' in section_text or 'forhandler' in section_text:
+                #     seller_info = extract_seller_info_from_section(section)
+                #     details["seller_info"].update(seller_info)
+        
+        # Alternative approach - look for specific data structures
+        if not details["specifications"]:
+            # Look for key-value pairs in various formats
+            specs = extract_specifications_alternative(soup)
+            details["specifications"].update(specs)
+        
+        if not details["equipment"]:
+            # Look for equipment lists
+            equipment = extract_equipment_alternative(soup)
+            details["equipment"].extend(equipment)
             
         return [TextContent(
             type="text",
@@ -223,10 +270,196 @@ async def extract_car_details(car_url: str):
     except Exception as e:
         return [TextContent(
             type="text",
-            text=json.dumps({"error": str(e)})
+            text=json.dumps({"error": str(e), "url": car_url})
         )]
 
-if __name__ == "__main__":
+def extract_description_from_section(section):
+    """Extract description text from a beskrivelse section"""
+    description = None
+    
+    # Method 1: Look for paragraphs in the section
+    paragraphs = section.find_all('p')
+    if paragraphs:
+        # Combine all paragraphs
+        desc_parts = []
+        for p in paragraphs:
+            text = p.get_text(strip=True)
+            if text and text.lower() != 'beskrivelse':  # Skip the header
+                desc_parts.append(text)
+        if desc_parts:
+            description = ' '.join(desc_parts)
+    
+    # Method 2: Look for divs with text content
+    if not description:
+        divs = section.find_all('div')
+        for div in divs:
+            text = div.get_text(strip=True)
+            if text and len(text) > 20 and text.lower() != 'beskrivelse':
+                # Check if this div doesn't have many nested elements (likely pure text)
+                nested_elements = len(div.find_all(['div', 'span', 'p']))
+                if nested_elements <= 2:  # Allow some nesting but not too much
+                    description = text
+                    break
+    
+    # Method 3: Get all text from section excluding header
+    if not description:
+        all_text = section.get_text(strip=True)
+        # Remove the "Beskrivelse" header if it's at the beginning
+        if all_text.lower().startswith('beskrivelse'):
+            description = all_text[11:].strip()  # Remove "beskrivelse" and clean
+        elif len(all_text) > 20:
+            description = all_text
+    
+    return description if description and len(description) > 10 else None
+
+def extract_specifications_from_section(section):
+    """Extract specifications from a section element"""
+    specs = {}
+    
+    # Look for definition lists (dl/dt/dd structure)
+    dl_elements = section.find_all('dl')
+    for dl in dl_elements:
+        dt_elements = dl.find_all('dt')
+        dd_elements = dl.find_all('dd')
+        
+        for dt, dd in zip(dt_elements, dd_elements):
+            key = dt.get_text(strip=True)
+            value = dd.get_text(strip=True)
+            if key and value:
+                specs[key] = value
+    
+    # Look for table structures
+    tables = section.find_all('table')
+    for table in tables:
+        rows = table.find_all('tr')
+        for row in rows:
+            cells = row.find_all(['td', 'th'])
+            if len(cells) >= 2:
+                key = cells[0].get_text(strip=True)
+                value = cells[1].get_text(strip=True)
+                if key and value:
+                    specs[key] = value
+    
+    # Look for div pairs or similar structures
+    divs = section.find_all('div')
+    for i in range(0, len(divs) - 1, 2):
+        if i + 1 < len(divs):
+            potential_key = divs[i].get_text(strip=True)
+            potential_value = divs[i + 1].get_text(strip=True)
+            
+            # Check if this looks like a key-value pair
+            if (len(potential_key) < 50 and len(potential_value) < 200 and 
+                ':' not in potential_key and potential_key and potential_value):
+                specs[potential_key] = potential_value
+    
+    return specs
+
+def extract_equipment_from_section(section):
+    """Extract equipment list from a section element"""
+    equipment = []
+    
+    # Look for unordered/ordered lists
+    lists = section.find_all(['ul', 'ol'])
+    for ul in lists:
+        items = ul.find_all('li')
+        for item in items:
+            text = item.get_text(strip=True)
+            if text and len(text) < 100:  # Avoid very long text that's not equipment
+                equipment.append(text)
+    
+    # Look for divs that might contain equipment items
+    divs = section.find_all('div')
+    for div in divs:
+        text = div.get_text(strip=True)
+        # Check if this looks like an equipment item (short, descriptive text)
+        if (text and len(text.split()) <= 5 and len(text) < 50 and 
+            not any(char.isdigit() for char in text[:10])):  # Avoid specs that start with numbers
+            if text not in equipment:  # Avoid duplicates
+                equipment.append(text)
+    
+    return equipment
+
+# def extract_seller_info_from_section(section):
+#     """Extract seller information from a section element"""
+#     seller_info = {}
+    
+#     # Look for common seller info patterns
+#     seller_patterns = {
+#         'name': ['navn', 'name', 'forhandler', 'dealer'],
+#         'phone': ['telefon', 'tlf', 'phone'],
+#         'email': ['e-post', 'email'],
+#         'address': ['adresse', 'address'],
+#         'location': ['sted', 'location', 'by']
+#     }
+    
+#     section_text = section.get_text()
+    
+#     # Extract phone numbers
+#     phone_match = re.search(r'(\+47\s?)?(\d{2}\s?\d{2}\s?\d{2}\s?\d{2})', section_text)
+#     if phone_match:
+#         seller_info['phone'] = phone_match.group(0)
+    
+#     # Extract email addresses
+#     email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', section_text)
+#     if email_match:
+#         seller_info['email'] = email_match.group(0)
+    
+#     # Look for other seller info in structured format
+#     for info_type, patterns in seller_patterns.items():
+#         for pattern in patterns:
+#             # Look for pattern followed by colon and value
+#             match = re.search(rf'{pattern}[:\s]+([^\n\r]+)', section_text, re.IGNORECASE)
+#             if match:
+#                 seller_info[info_type] = match.group(1).strip()
+#                 break
+    
+#     return seller_info
+ 
+def extract_specifications_alternative(soup):
+    """Alternative method to extract specifications if section-based approach fails"""
+    specs = {}
+    
+    # Look for any element that might contain specifications
+    spec_keywords = ['motor', 'drivstoff', 'girkasse', 'hjuldrift', 'årsmodell', 'kilometer', 
+                    'effekt', 'sylindre', 'co2', 'forbruk', 'toppfart', 'acceleration']
+    
+    for keyword in spec_keywords:
+        # Look for text that contains the keyword followed by a value
+        pattern = rf'{keyword}[:\s]*([^\n\r,]+)'
+        matches = re.findall(pattern, soup.get_text(), re.IGNORECASE)
+        if matches:
+            specs[keyword.capitalize()] = matches[0].strip()
+    
+    return specs
+
+def extract_equipment_alternative(soup):
+    """Alternative method to extract equipment if section-based approach fails"""
+    equipment = []
+    
+    # Common Norwegian car equipment terms
+    equipment_keywords = [
+        'klimaanlegg', 'aircondition', 'cruisecontrol', 'navigasjon', 'gps',
+        'bluetooth', 'dab', 'radio', 'cd', 'mp3', 'usb', 'aux',
+        'elektriske', 'oppvarming', 'kjøling', 'automatisk', 'manuell',
+        'sportsseter', 'skinnseter', 'elektrisk', 'parkeringssensor',
+        'ryggekamera', 'xenon', 'led', 'tåkelys', 'metallic', 'felger'
+    ]
+    
+    soup_text = soup.get_text().lower()
+    
+    for keyword in equipment_keywords:
+        if keyword in soup_text:
+            # Try to extract the full equipment name around the keyword
+            pattern = f'([^.\n]*{keyword}[^.\n]*)'
+            matches = re.findall(pattern, soup_text, re.IGNORECASE)
+            for match in matches:
+                clean_match = match.strip()
+                if 10 < len(clean_match) < 50:  # Reasonable length for equipment item
+                    equipment.append(clean_match.capitalize())
+    
+    return list(set(equipment))  # Remove duplicates
+
+""" if __name__ == "__main__":
     import sys
     from mcp.server.stdio import stdio_server
     
@@ -238,4 +471,5 @@ if __name__ == "__main__":
                 app.create_initialization_options()
             )
     
-    asyncio.run(main())
+    asyncio.run(main()) """
+
