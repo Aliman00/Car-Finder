@@ -2,6 +2,7 @@ import asyncio
 import json
 from mcp.server import Server
 from mcp.types import Tool, TextContent
+from lxml import html
 import requests
 from bs4 import BeautifulSoup
 import re
@@ -212,14 +213,17 @@ async def extract_car_details(car_url: str):
             "title": None,
             "description": None,
             "specifications": {},
-            "equipment": []
-            # "seller_info": {}
+            "equipment": [],
+            "heftelser_info": {}  # Erstatter seller_info
         }
         
         # Extract title
         title_tag = soup.find('h1')
         if title_tag:
             details["title"] = title_tag.get_text(strip=True)
+        
+        # Extract registration number from specifications for heftelser lookup
+        registration_number = None
         
         # Find the main content area
         main_content = soup.find('main')
@@ -240,27 +244,37 @@ async def extract_car_details(car_url: str):
                 elif 'spesifikasjoner' in section_text or 'specifications' in section_text:
                     specs = extract_specifications_from_section(section)
                     details["specifications"].update(specs)
+                    
+                    # Look for registration number in specifications
+                    for key, value in specs.items():
+                        if 'registreringsnummer' in key.lower() or 'regnr' in key.lower():
+                            registration_number = value
                 
                 # Extract Equipment (Utstyr) - section[3]
                 elif 'utstyr' in section_text or 'equipment' in section_text:
                     equipment = extract_equipment_from_section(section)
                     details["equipment"].extend(equipment)
-                
-                # Extract seller info
-                # elif 'selger' in section_text or 'dealer' in section_text or 'forhandler' in section_text:
-                #     seller_info = extract_seller_info_from_section(section)
-                #     details["seller_info"].update(seller_info)
         
-        # Alternative approach - look for specific data structures
+        # Alternative approach for specs if not found
         if not details["specifications"]:
-            # Look for key-value pairs in various formats
             specs = extract_specifications_alternative(soup)
             details["specifications"].update(specs)
+            
+            # Look for registration number in alternative specs
+            for key, value in specs.items():
+                if 'registreringsnummer' in key.lower() or 'regnr' in key.lower():
+                    registration_number = value
         
         if not details["equipment"]:
-            # Look for equipment lists
             equipment = extract_equipment_alternative(soup)
             details["equipment"].extend(equipment)
+        
+        # Scrape heftelser info if we found a registration number
+        if registration_number:
+            heftelser_info = await scrape_heftelser_info(registration_number)
+            details["heftelser_info"] = heftelser_info
+        else:
+            details["heftelser_info"] = {"error": "Registreringsnummer ikke funnet"}
             
         return [TextContent(
             type="text",
@@ -273,6 +287,58 @@ async def extract_car_details(car_url: str):
             text=json.dumps({"error": str(e), "url": car_url})
         )]
 
+async def scrape_heftelser_info(registration_number: str):
+    """Scrape heftelser information for a given registration number"""
+    try:
+        # Construct the heftelser URL (du må angi riktig URL format)
+        # Eksempel URL - du må tilpasse dette til riktig format
+        heftelser_url = f"https://rettsstiftelser.brreg.no/nb/oppslag/motorvogn/{registration_number}"  # Tilpass URL
+        
+        response = requests.get(heftelser_url, timeout=10)
+        response.raise_for_status()
+        
+        tree = html.fromstring(response.content)
+        
+        heftelser_info = {
+            "registration_number": registration_number,
+            "has_heftelser": True,
+            "belop": None,
+            "pantsettere": [],
+            "status": "success"
+        }
+        
+        # Sjekk om det finnes pant
+        pant_tekst = "Det er ingen oppføringer på registreringsnummer"
+        if pant_tekst in tree.text_content():
+            heftelser_info["has_heftelser"] = False
+            heftelser_info["status"] = "ingen_heftelser"
+            return heftelser_info
+        
+        # Hent beløp
+        belop_xpath = "//*[contains(text(), 'NOK')]"
+        belop_element = tree.xpath(belop_xpath)
+        if belop_element:
+            heftelser_info["belop"] = belop_element[0].text.strip()
+        
+        # Generell XPath for alle pantsettere
+        pantsettere_xpath = "/html/body/main/section/article/div[1]/div/div/div/div/div/div[1]/div/div[2]/text()"
+        pantsettere = tree.xpath(pantsettere_xpath)
+        
+        heftelser_info["pantsettere"] = [pantsetter.strip() for pantsetter in pantsettere if pantsetter.strip()]
+        
+        if not heftelser_info["pantsettere"]:
+            heftelser_info["status"] = "ingen_pantsettere_funnet"
+        
+        return heftelser_info
+        
+    except Exception as e:
+        return {
+            "registration_number": registration_number,
+            "error": str(e),
+            "status": "error"
+        }
+
+# Behold alle de andre hjelpefunksjonene som før...
 def extract_description_from_section(section):
     """Extract description text from a beskrivelse section"""
     description = None
@@ -459,17 +525,23 @@ def extract_equipment_alternative(soup):
     
     return list(set(equipment))  # Remove duplicates
 
-""" if __name__ == "__main__":
-    import sys
-    from mcp.server.stdio import stdio_server
+# """ if __name__ == "__main__":
+#     import sys
+#     from mcp.server.stdio import stdio_server
     
-    async def main():
-        async with stdio_server() as (read_stream, write_stream):
-            await app.run(
-                read_stream, 
-                write_stream, 
-                app.create_initialization_options()
-            )
+#     async def main():
+#         async with stdio_server() as (read_stream, write_stream):
+#             await app.run(
+#                 read_stream, 
+#                 write_stream, 
+#                 app.create_initialization_options()
+#             )
     
-    asyncio.run(main()) """
+#     asyncio.run(main()) """
 
+
+bilURL = "https://www.finn.no/mobility/item/412445564"
+
+with open("test.json", "w", encoding="utf-8") as f:
+    result = asyncio.run(extract_car_details(bilURL))
+    f.write(result[0].text)
